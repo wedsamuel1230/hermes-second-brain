@@ -23,6 +23,7 @@ Rules of this pass:
 from __future__ import annotations
 
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -36,7 +37,10 @@ SIGNAL_TTL_DAYS = 30
 
 # "唔該" is politeness, not negation — strip those before looking for a negator.
 NEGATION_PHRASES = ("唔該", "唔好意思", "唔緊要")
-NEGATION = ("唔", "不", "冇", "勿", "別", "别", "無", "无", "don't", "dont", "do not", "not", "never", "without")
+NEGATION = ("唔", "不", "冇", "勿", "別", "别", "無", "无", "沒", "没", "未", "非",
+            "don't", "dont", "do not", "not", "never", "without")
+
+NUM = re.compile(r"\d+(?:\.\d+)?")
 
 
 def has_negation(text: str) -> bool:
@@ -44,6 +48,13 @@ def has_negation(text: str) -> bool:
     for phrase in NEGATION_PHRASES:
         flat = flat.replace(phrase, "")
     return any(token in flat for token in NEGATION)
+
+
+def numeric_conflict(a: str, b: str) -> bool:
+    """'每頁 3 個重點' and '每頁 5 個重點' are different values, not repeats."""
+    na = set(NUM.findall(normalize(a)))
+    nb = set(NUM.findall(normalize(b)))
+    return bool(na and nb and na != nb)
 
 
 def strip_negation(text: str) -> str:
@@ -65,7 +76,9 @@ def _dice(a: str, b: str) -> float:
 
 
 def polarity_conflict(a: str, b: str) -> bool:
-    """Same statement, opposite polarity: a contradiction, never a repeat."""
+    """Same statement, opposite polarity or a different value: never a repeat."""
+    if numeric_conflict(a, b):
+        return True
     if has_negation(a) == has_negation(b):
         return False
     return _dice(strip_negation(a), strip_negation(b)) >= 0.6

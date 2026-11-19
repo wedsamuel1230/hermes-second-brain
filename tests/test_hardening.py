@@ -4,7 +4,9 @@ Each test names the defect it locks down, so a future change that reintroduces
 the behaviour fails here instead of in production.
 """
 
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -238,6 +240,88 @@ class LockAndCaptureTest(unittest.TestCase):
             code = cli.main(["--vault", d, "capture", "。"])
             self.assertEqual(code, 2)
             self.assertEqual(Vault(d).md_files("inbox"), [])
+
+
+class NumericConflictTest(unittest.TestCase):
+    """B11 (grok): a changed number is a new value, not a repeat."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Vault(self.tmp.name).ensure()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_different_numbers_never_promote(self):
+        signal(self.vault, "s1", "簡報每頁 3 個重點")
+        signal(self.vault, "s2", "簡報每頁 5 個重點")
+        report = dream.run(self.vault)
+        self.assertEqual(report.promoted, [])
+        self.assertEqual(len(report.conflicts), 1)
+
+    def test_same_number_still_promotes(self):
+        signal(self.vault, "s1", "簡報每頁 3 個重點")
+        signal(self.vault, "s2", "每頁簡報 3 個重點")
+        report = dream.run(self.vault)
+        self.assertEqual(len(report.promoted), 1)
+        self.assertEqual(report.conflicts, [])
+
+    def test_chinese_negators_beyond_wu(self):
+        signal(self.vault, "s1", "要開冷氣")
+        signal(self.vault, "s2", "不要開冷氣")
+        report = dream.run(self.vault)
+        self.assertEqual(report.promoted, [])
+        self.assertEqual(len(report.conflicts), 1)
+
+
+class HookFailOpenTest(unittest.TestCase):
+    """B13 (grok): the hook must exit 0 and stay silent when anything breaks."""
+
+    HOOK = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "hooks", "brain-context.py")
+
+    def _run(self, payload, vault):
+        env = dict(os.environ, HSB_VAULT=vault)
+        return subprocess.run([sys.executable, self.HOOK], input=payload, text=True,
+                              capture_output=True, env=env, timeout=30)
+
+    def test_invalid_stdin_exits_zero(self):
+        proc = self._run("{not json", "/nonexistent")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.strip(), "")
+
+    def test_corrupt_config_still_exits_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            vault = Vault(d).ensure()
+            os.remove(vault.config_path)
+            os.makedirs(vault.config_path)          # a directory where a file belongs
+            proc = self._run('{"user_message":"hello there"}', d)
+            self.assertEqual(proc.returncode, 0)
+            if proc.stdout.strip():
+                data = json.loads(proc.stdout)
+                self.assertLessEqual(len(data["context"]), 700)
+
+    def test_missing_vault_is_silent(self):
+        proc = self._run('{"user_message":"hello there"}', "/nonexistent/vault")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.strip(), "")
+
+
+class SmallVaultRetrievalTest(unittest.TestCase):
+    """B12 (grok): the rare-term gate must work on a 10-note vault, not only ≥20."""
+
+    def test_hapax_matches_in_small_vault(self):
+        with tempfile.TemporaryDirectory() as d:
+            vault = Vault(d).ensure()
+            for i in range(9):
+                vault.save_card(f"notes/n{i}.md", {"title": f"一般筆記 {i}", "type": "concept"},
+                                 f"# 一般筆記 {i}\n\n普通內容。\n")
+            vault.save_card("notes/zed.md", {"title": "歷史人物", "type": "concept"},
+                            "# 歷史人物\n\nZedekiah 係猶大王。\n")
+            idx = index.build(vault)
+            hits = index.search(idx, "Zedekiah")
+            self.assertTrue(hits)
+            self.assertEqual(hits[0].path, "notes/zed.md")
 
 
 class DigestBudgetTest(unittest.TestCase):
