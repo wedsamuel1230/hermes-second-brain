@@ -23,65 +23,20 @@ Rules of this pass:
 from __future__ import annotations
 
 import os
-import re
-from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from . import digest
 from .store import Card, Vault, slugify, today, now_iso
-from .text import normalize, similarity, slugify_key
+from .text import conflicts, normalize, similarity, slugify_key
 
 KINDS = ("correction", "preference", "decision", "fact")
 SIGNAL_TTL_DAYS = 30
 
-# "唔該" is politeness, not negation — strip those before looking for a negator.
-NEGATION_PHRASES = ("唔該", "唔好意思", "唔緊要")
-NEGATION = ("唔", "不", "冇", "勿", "別", "别", "無", "无", "沒", "没", "未", "非",
-            "don't", "dont", "do not", "not", "never", "without")
-
-NUM = re.compile(r"\d+(?:\.\d+)?")
-
-
-def has_negation(text: str) -> bool:
-    flat = normalize(text)
-    for phrase in NEGATION_PHRASES:
-        flat = flat.replace(phrase, "")
-    return any(token in flat for token in NEGATION)
-
-
-def numeric_conflict(a: str, b: str) -> bool:
-    """'每頁 3 個重點' and '每頁 5 個重點' are different values, not repeats."""
-    na = set(NUM.findall(normalize(a)))
-    nb = set(NUM.findall(normalize(b)))
-    return bool(na and nb and na != nb)
-
-
-def strip_negation(text: str) -> str:
-    flat = normalize(text)
-    for phrase in NEGATION_PHRASES:
-        flat = flat.replace(phrase, "")
-    for token in NEGATION:
-        flat = flat.replace(token, "")
-    return flat
-
-
-def _dice(a: str, b: str) -> float:
-    """Character-bigram-free overlap. Chinese inserts a negator mid-word, so the
-    term tokeniser is too coarse to compare '回覆加emoji' with '回覆唔好加emoji'."""
-    if not a or not b:
-        return 0.0
-    common = sum((Counter(a) & Counter(b)).values())
-    return 2 * common / (len(a) + len(b))
-
 
 def polarity_conflict(a: str, b: str) -> bool:
-    """Same statement, opposite polarity or a different value: never a repeat."""
-    if numeric_conflict(a, b):
-        return True
-    if has_negation(a) == has_negation(b):
-        return False
-    return _dice(strip_negation(a), strip_negation(b)) >= 0.6
+    """Backwards-compatible name: any contradiction, not just negation."""
+    return conflicts(a, b)
 
 
 @dataclass
@@ -212,8 +167,7 @@ def _cluster(signals: list[Signal], rules: list[Card], threshold: float) -> list
     for sig in signals:
         if sig.key and sig.key in by_key:
             cluster = by_key[sig.key]
-            if polarity_conflict(sig.text, cluster.rep) or (
-                    has_negation(sig.text) != has_negation(cluster.rep) and similarity(sig.text, cluster.rep) >= 0.5):
+            if polarity_conflict(sig.text, cluster.rep):
                 cluster.conflicted = True
             cluster.members.append(sig)
             continue
@@ -229,7 +183,7 @@ def _cluster(signals: list[Signal], rules: list[Card], threshold: float) -> list
         if best is not None and best_score >= threshold:
             # Same words with the opposite polarity ("加 emoji" / "唔好加 emoji")
             # is a contradiction, not a repeat: it must never be averaged into a rule.
-            if has_negation(sig.text) != has_negation(best.rep):
+            if polarity_conflict(sig.text, best.rep):
                 best.conflicted = True
             best.members.append(sig)
             if sig.key and sig.key not in by_key:
@@ -283,6 +237,7 @@ def _run(vault: Vault, dry_run: bool = False) -> Report:
     clusters = _cluster(signals, rules, threshold)
 
     used_paths: set[str] = set()
+    promoted_texts: list[str] = []
     for cluster in clusters:
         distinct_days = {s.created[:10] for s in cluster.members if s.created}
 
@@ -336,16 +291,23 @@ def _run(vault: Vault, dry_run: bool = False) -> Report:
         if support < min_support:
             continue
 
+        rule_text = _rule_text(cluster)
+        clash = _clash_with(rule_text, rules, promoted_texts)
+        if clash:
+            report.conflicts.append({"key": cluster.key, "texts": [rule_text, clash]})
+            continue
+
         for member in cluster.members:
             used_paths.add(member.path)
         term_key = cluster.key or slugify_key(cluster.rep)
-        rule_text = _rule_text(cluster)
         if dry_run:
+            promoted_texts.append(rule_text)
             report.promoted.append({"id": f"(new) {rule_text[:40]}", "rule": rule_text,
                                     "support": support, "confidence": _confidence(support, 0, 0)})
             continue
         path, rid = _write_rule(vault, rule_text, term_key, cluster, support, stamp)
         cluster.rule_path = path
+        promoted_texts.append(rule_text)
         report.promoted.append({"id": rid, "rule": rule_text, "support": support,
                                 "confidence": _confidence(support, 0, 0), "path": path})
 
@@ -408,6 +370,23 @@ def _run(vault: Vault, dry_run: bool = False) -> Report:
         vault.log("dream", f"signals={report.signals} promoted={len(report.promoted)} "
                            f"retired={len(report.retired)} conflicts={len(report.conflicts)}")
     return report
+
+
+def _clash_with(text: str, rules: list[Card], promoted: list[str]) -> str | None:
+    """A statement that contradicts `text`, whether already live or promoted this run.
+
+    This is what stops two opposite preferences from each getting their own rule:
+    overlap alone never joins them into one cluster, so the check has to happen at
+    promotion time as well.
+    """
+    for card in rules:
+        other = str(card.meta.get("rule") or "").strip()
+        if other and conflicts(text, other):
+            return other
+    for other in promoted:
+        if conflicts(text, other):
+            return other
+    return None
 
 
 def _merge_body(card: Card, members: list[Signal]) -> str:

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from .index import Hit, search
 from .store import Card, Vault, today
+from .text import conflicts
 
 BULLET = re.compile(r"^\s*(?:[-*]|\d+\.)\s+(.*)$")
 BULLET_MAX = 110
@@ -73,6 +74,7 @@ class Rule:
     confidence: float
     applied: int
     violated: int
+    last_used: str = ""
 
     def line(self) -> str:
         return f"{self.text} (信心 {self.confidence:.2f} · {self.applied}/{self.applied + self.violated} 次應驗)"
@@ -99,9 +101,17 @@ def active_rules(vault: Vault, limit: int = 6) -> list[Rule]:
             confidence=conf,
             applied=int(card.meta.get("applied") or 0),
             violated=int(card.meta.get("violated") or 0),
+            last_used=str(card.meta.get("last_used") or card.meta.get("updated") or ""),
         ))
-    rules.sort(key=lambda r: (-r.confidence, r.path))
-    return rules[:limit]
+    # Newest wins a contradiction: an older rule that says the opposite of a
+    # fresher one is stale by definition, and the digest must never carry both.
+    rules.sort(key=lambda r: (r.last_used, r.confidence, r.path), reverse=True)
+    kept: list[Rule] = []
+    for rule in rules:
+        if any(conflicts(rule.text, k.text) for k in kept):
+            continue
+        kept.append(rule)
+    return kept[:limit]
 
 
 def render(vault: Vault, message: str = "", budget: int | None = None) -> str:

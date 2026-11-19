@@ -57,9 +57,15 @@ reviewable.
 2. **Cluster.** A signal with `key` joins the cluster or rule with the same key. Otherwise it joins the
    cluster with the highest `similarity()`, if that reaches `dream.similarity` (default 0.62). Otherwise
    it starts a new cluster.
-3. **Refuse contradictions.** If two candidates for one cluster carry opposite polarity — `加 emoji` vs
-   `唔好加 emoji`, `I like X` vs `I don't like X` — the cluster is marked `conflicted`, nothing is
-   promoted, and the pair is printed in the report for a human decision. Signals stay in `inbox/`.
+3. **Refuse contradictions.** Three deterministic checks, applied when signals cluster *and* again
+   before a rule is written:
+   - polarity — one side carries a negator the other lacks (`加 emoji` / `唔好加 emoji`);
+   - value — both carry numbers and the numbers differ (`每頁 3 個重點` / `每頁 5 個重點`);
+   - antonym — each side holds one member of a closed opposite table (`dark`/`light`, `開`/`關`,
+     `enable`/`disable`, …, 27 pairs).
+   A contradiction never promotes, never reinforces, and is printed in the report with both texts; its
+   signals stay in `inbox/` for a human. A new rule is also checked against every live rule, so two
+   opposite preferences cannot each get their own file.
 4. **Promote.** A cluster with `support >= dream.min_support` (default 2) and no existing rule becomes a
    rule. `support` counts *independent occurrences*: an identical signal captured twice on the same day
    is one occurrence, two different phrasings are two. The rule text is the shortest signal in the

@@ -10,7 +10,7 @@ database, no embeddings, and no model inside the consolidation loop.
 ./bin/hsb context "help me plan tomorrow"        # what a hook would inject into the turn
 ```
 
-47 unit tests. Search over this machine's 162 real notes: 0.43 s to build, 2.4 ms median per query,
+59 unit tests. Search over this machine's 162 real notes: 0.43 s to build, 2.4 ms median per query,
 40/40 correct on exact titles. Digest: 700–1200 characters, rebuilt from files every turn.
 
 ## The problem it solves
@@ -99,7 +99,7 @@ understand. The Hermes part is the hook, the skill and the cron job.
 
 | Measurement | Value | Environment |
 |---|---|---|
-| Unit tests | 47 passed | Python 3.14, stdlib only |
+| Unit tests | 59 passed | Python 3.14, stdlib only |
 | Index build, 162 real notes | 0.43 s | `/config/wiki`, mixed Chinese/English |
 | Search median / p95, prefix query | 2.4 ms / 9.3 ms | same corpus, 40 queries |
 | Exact-title query | 40/40 top-1, 0.45 ms | same corpus |

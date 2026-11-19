@@ -99,3 +99,101 @@ def excerpt(text: str, needles: list[str], width: int = 140) -> str:
 
 def wikilinks(text: str) -> list[str]:
     return [m.group(1).split("|")[0].strip() for m in re.finditer(r"\[\[([^\]]+)\]\]", text)]
+
+
+# --- contradiction detection -------------------------------------------------
+# Two signals that look alike but mean opposite things must never be averaged into
+# one rule. Three mechanisms, all deterministic:
+#   * polarity: one side carries a negator the other lacks
+#   * numeric: both carry numbers and the numbers differ
+#   * antonym: one side holds one member of a known opposite pair
+# The antonym table is closed on purpose. Anything outside it is a documented gap,
+# visible in the dream report, rather than a guess made by the agent.
+
+NEGATION_PHRASES = ("唔該", "唔好意思", "唔緊要")
+NEGATION = ("唔", "不", "冇", "勿", "別", "别", "無", "无", "沒", "没", "未", "非",
+            "don't", "dont", "do not", "not", "never", "without")
+
+NUM = re.compile(r"\d+(?:\.\d+)?")
+
+ANTONYMS: tuple[tuple[str, str], ...] = (
+    ("dark", "light"), ("on", "off"), ("enable", "disable"), ("enabled", "disabled"),
+    ("high", "low"), ("fast", "slow"), ("increase", "decrease"), ("add", "remove"),
+    ("always", "never"), ("more", "less"), ("up", "down"), ("before", "after"),
+    ("開", "關"), ("亮", "暗"), ("大", "小"), ("快", "慢"), ("多", "少"),
+    ("前", "後"), ("上", "下"), ("左", "右"), ("新", "舊"), ("遠", "近"),
+    ("內", "外"), ("冷", "熱"), ("早", "晚"), ("加", "減"), ("繁", "簡"),
+)
+
+WORDS = re.compile(r"[a-z][a-z0-9']*")
+
+
+def has_negation(text: str) -> bool:
+    flat = normalize(text)
+    for phrase in NEGATION_PHRASES:
+        flat = flat.replace(phrase, "")
+    return any(token in flat for token in NEGATION)
+
+
+def strip_negation(text: str) -> str:
+    flat = normalize(text)
+    for phrase in NEGATION_PHRASES:
+        flat = flat.replace(phrase, "")
+    for token in NEGATION:
+        flat = flat.replace(token, "")
+    return flat
+
+
+def _dice(a: str, b: str) -> float:
+    """Character overlap. Chinese inserts a negator inside the phrase, so the
+    bigram tokeniser is too coarse to compare '回覆加emoji' with '回覆唔好加emoji'."""
+    if not a or not b:
+        return 0.0
+    common = sum((Counter(a) & Counter(b)).values())
+    return 2 * common / (len(a) + len(b))
+
+
+def numeric_conflict(a: str, b: str) -> bool:
+    """'每頁 3 個重點' and '每頁 5 個重點' are different values, not repeats."""
+    na = set(NUM.findall(normalize(a)))
+    nb = set(NUM.findall(normalize(b)))
+    return bool(na and nb and na != nb)
+
+
+def _words(text: str) -> set[str]:
+    """ASCII words from the raw text: normalize() strips spaces, which would fuse
+    'prefer dark mode' into one token and hide the antonym."""
+    return set(WORDS.findall(text.lower()))
+
+
+def _antonym_hit(a: str, b: str, one: str, two: str) -> bool:
+    """True when each text holds exactly one member of the pair."""
+    if one.isascii():
+        wa, wb = _words(a), _words(b)
+        if one in wa and two in wb and one not in wb and two not in wa:
+            rest_a = " ".join(sorted(wa - {one}))
+            rest_b = " ".join(sorted(wb - {two}))
+            return _dice(rest_a, rest_b) >= 0.7
+        return False
+    na, nb = normalize(a), normalize(b)
+    if one in na and two in nb and one not in nb and two not in na:
+        return _dice(na.replace(one, ""), nb.replace(two, "")) >= 0.72
+    return False
+
+
+def antonym_conflict(a: str, b: str) -> bool:
+    for one, two in ANTONYMS:
+        if _antonym_hit(a, b, one, two) or _antonym_hit(a, b, two, one):
+            return True
+    return False
+
+
+def conflicts(a: str, b: str) -> bool:
+    """Any reason these two statements contradict each other."""
+    if numeric_conflict(a, b):
+        return True
+    if antonym_conflict(a, b):
+        return True
+    if has_negation(a) == has_negation(b):
+        return False
+    return _dice(strip_negation(a), strip_negation(b)) >= 0.6

@@ -324,6 +324,68 @@ class SmallVaultRetrievalTest(unittest.TestCase):
             self.assertEqual(hits[0].path, "notes/zed.md")
 
 
+class AntonymConflictTest(unittest.TestCase):
+    """B14 (grok): opposite values that share no negator must not become two rules."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Vault(self.tmp.name).ensure()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_dark_and_light_never_both_promote(self):
+        signal(self.vault, "d1", "prefer dark mode")
+        signal(self.vault, "d2", "dark mode preferred")
+        signal(self.vault, "l1", "prefer light mode")
+        signal(self.vault, "l2", "light mode preferred")
+        report = dream.run(self.vault)
+        self.assertLessEqual(len(report.promoted), 1)
+        self.assertGreaterEqual(len(report.conflicts), 1)
+        self.assertEqual(len(self.vault.cards("preferences")), len(report.promoted))
+
+    def test_kai_and_gwun_conflict(self):
+        signal(self.vault, "s1", "客廳要開冷氣")
+        signal(self.vault, "s2", "客廳要開冷氣啦")
+        signal(self.vault, "s3", "客廳要關冷氣")
+        signal(self.vault, "s4", "客廳要關冷氣啦")
+        report = dream.run(self.vault)
+        self.assertLessEqual(len(report.promoted), 1)
+        self.assertGreaterEqual(len(report.conflicts), 1)
+
+    def test_unrelated_characters_do_not_conflict(self):
+        signal(self.vault, "s1", "開會準備資料")
+        signal(self.vault, "s2", "關門時間確認")
+        report = dream.run(self.vault)
+        self.assertEqual(report.conflicts, [])
+
+    def test_english_word_boundaries(self):
+        # "on" must not match inside "content" or "only"
+        signal(self.vault, "s1", "turn on the cache")
+        signal(self.vault, "s2", "cache only content")
+        report = dream.run(self.vault)
+        self.assertEqual(report.conflicts, [])
+
+
+class DigestConflictFilterTest(unittest.TestCase):
+    """B14: even if two opposite rules exist on disk, the digest carries one."""
+
+    def test_newest_of_a_contradiction_wins(self):
+        with tempfile.TemporaryDirectory() as d:
+            vault = Vault(d).ensure()
+            vault.save_card("preferences/P-a.md",
+                            {"title": "客廳要開冷氣", "type": "preference", "id": "P-a",
+                             "rule": "客廳要開冷氣", "confidence": 0.8, "applied": 2, "violated": 0,
+                             "status": "active", "last_used": "2026-10-01"}, "# 客廳要開冷氣\n")
+            vault.save_card("preferences/P-b.md",
+                            {"title": "客廳要關冷氣", "type": "preference", "id": "P-b",
+                             "rule": "客廳要關冷氣", "confidence": 0.7, "applied": 1, "violated": 0,
+                             "status": "active", "last_used": "2026-11-01"}, "# 客廳要關冷氣\n")
+            text = digest.render(vault)
+            self.assertIn("客廳要關冷氣", text)
+            self.assertNotIn("客廳要開冷氣", text)
+
+
 class DigestBudgetTest(unittest.TestCase):
     """B2 (gpt): the budget holds for CJK text, not just ASCII."""
 

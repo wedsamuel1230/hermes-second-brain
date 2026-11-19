@@ -121,22 +121,30 @@ Without a key, similarity decides.
 *Rejected:* relying on similarity alone. "用繁體中文回覆" and "英文技術詞保留原文" score near zero against
 each other and belong to one rule; only the agent knows they are the same intent.
 
-## D12 — Opposite polarity is a contradiction, not a near-duplicate
+## D12 — A contradiction is never averaged into a rule
 
-Term overlap cannot tell "加 emoji" from "唔好加 emoji": the bigrams overlap and the negator is one
-character. Two guards:
+Term overlap cannot tell "加 emoji" from "唔好加 emoji", or "prefer dark mode" from "prefer light mode":
+the words are nearly identical and the difference is one character or one token. Three checks, all
+deterministic and all applied both when signals cluster and again before a rule file is written:
 
-1. `polarity_conflict()` compares the texts with negators removed using a character-overlap (Dice)
-   coefficient, because Chinese inserts the negator *inside* the phrase and the bigram tokeniser is too
-   coarse to see it.
-2. A conflicted cluster is never promoted and never reinforced. It is printed in the dream report and its
-   signals stay in `inbox/` for a human.
+1. **Polarity** — if exactly one text carries a negator (唔 不 冇 沒 没 未 非 勿 別 無, not/never/without),
+   the negators are stripped and the remainders compared with a character-overlap (Dice) coefficient;
+   ≥ 0.6 means the same statement with opposite polarity. Politeness forms (唔該 / 唔好意思) are stripped
+   first so they do not read as negation.
+2. **Value** — if both texts contain numbers and the sets differ, it is a new value, not a repeat.
+3. **Antonym** — a closed table of 27 opposite pairs (dark/light, on/off, enable/disable, 開/關, 亮/暗,
+   大/小, 冷/熱, 繁/簡 …). ASCII members match whole words only, so `on` does not fire inside `content`;
+   CJK members must leave near-identical remainders after removal, so `開會` does not collide with `關門`.
 
-The same mechanism makes a newer wording supersede an older one under a shared `key`: the newest signal's
-text becomes the rule, the old text moves to `superseded:` and stays in the body.
-*Evidence:* `tests/test_hardening.py::NegationConflictTest` and `SupersedeTest`.
-*Limit:* politeness forms (唔該, 唔好意思) are stripped first, but a genuine negator inside a set phrase can
-still be misread; that failure is visible as a report entry, not as a silent rule.
+A conflicted cluster is never promoted or reinforced; it is printed in the report with both texts and its
+signals stay in `inbox/`. `_clash_with()` repeats the check against every live rule before writing, so
+opposite preferences cannot each get their own file. As a last line of defence the digest itself drops a
+rule that contradicts a newer one.
+
+The antonym table is closed on purpose: an unlisted opposite (`prefer tea` / `prefer coffee`) is a
+documented gap, and it fails safe — two separate rules, visible in `hsb stats`, rather than a silent
+merge into one wrong rule. *Evidence:* `tests/test_hardening.py::AntonymConflictTest`,
+`DigestConflictFilterTest`, `NegationConflictTest`, `NumericConflictTest`.
 
 ## D13 — Writes are atomic and serialised
 
