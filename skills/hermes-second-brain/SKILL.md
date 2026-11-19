@@ -85,6 +85,11 @@ Never hand-write a rule into `preferences/`. If a rule is wrong, mark it violate
 field deliberately and say so. If a promoted rule's wording is clumsy, edit `rule:` — the frontmatter is
 the contract, the body is provenance.
 
+A later statement that contradicts a live rule replaces it automatically when it is strictly newer: the
+old file moves to `_archive/preferences/` with `status: superseded`, `superseded_by` and a reason. The
+same-day case, and anything the antonym table does not know, is reported as `矛盾` and left in `inbox/`
+for a human — check the dream report before assuming the brain changed its mind.
+
 ## Checks
 
 ```bash
