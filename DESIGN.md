@@ -36,19 +36,23 @@ memory worse over time, which is the opposite of the goal.
 *Evidence:* the promotion path is `similarity() + Counter`. Every rule keeps the exact signals that
 created it, so a bad rule is traceable to a sentence someone actually said.
 
-## D4 — Confidence is a Beta posterior, and rules retire at 0.45
+## D4 — Confidence is a Beta posterior, decay is recomputed, rules retire at 0.45
 
 ```
-confidence = (1 + support + applied) / (2 + support + applied + violated)
+base       = (1 + support + applied) / (2 + support + applied + violated)
+confidence = base × max(0, 1 − 0.15 × (unused_days // stale_days))
 ```
 
-`support` counts the independent signals that promoted the rule (two on one day counts as two), `applied`
-counts confirmed uses, `violated` counts refutations. Two signals: 0.75. One application: 0.80. Five
+`support` counts independent occurrences (an identical capture on the same day counts once), `applied`
+counts confirmed uses, `violated` counts refutations. Two occurrences: 0.75. One application: 0.80. Five
 violations after that: below 0.45, which retires the rule at the next pass.
 
-*Rejected:* a plain "seen 3 times = keep" counter. It never falls, so a rule that was true in March and
-false in November stays at full strength.
-*Evidence:* `tests/test_dream.py::test_evidence_moves_confidence_both_ways` walks the whole curve.
+*Rejected:* a plain "seen 3 times = keep" counter — it never falls, so a rule true in March and false in
+November stays at full strength. Also rejected: mutating a stored number by −15% per night, which either
+compounds to death in four nights or is recomputed away on the next run. The effective value is a pure
+function of the record and the clock, so the same day always yields the same number.
+*Evidence:* `tests/test_hardening.py::DecayTest` walks both directions and asserts the second run changes
+nothing.
 
 ## D5 — The digest is generated, not written
 
@@ -116,3 +120,41 @@ Without a key, similarity decides.
 
 *Rejected:* relying on similarity alone. "用繁體中文回覆" and "英文技術詞保留原文" score near zero against
 each other and belong to one rule; only the agent knows they are the same intent.
+
+## D12 — Opposite polarity is a contradiction, not a near-duplicate
+
+Term overlap cannot tell "加 emoji" from "唔好加 emoji": the bigrams overlap and the negator is one
+character. Two guards:
+
+1. `polarity_conflict()` compares the texts with negators removed using a character-overlap (Dice)
+   coefficient, because Chinese inserts the negator *inside* the phrase and the bigram tokeniser is too
+   coarse to see it.
+2. A conflicted cluster is never promoted and never reinforced. It is printed in the dream report and its
+   signals stay in `inbox/` for a human.
+
+The same mechanism makes a newer wording supersede an older one under a shared `key`: the newest signal's
+text becomes the rule, the old text moves to `superseded:` and stays in the body.
+*Evidence:* `tests/test_hardening.py::NegationConflictTest` and `SupersedeTest`.
+*Limit:* politeness forms (唔該, 唔好意思) are stripped first, but a genuine negator inside a set phrase can
+still be misread; that failure is visible as a report entry, not as a silent rule.
+
+## D13 — Writes are atomic and serialised
+
+Every write is a temp file in the same directory, `fsync`, `os.replace`. Every mutation of the vault is
+inside `fcntl.flock` on `_meta/.lock`, so `capture` and `dream` cannot interleave; the lock disappears
+with the process. Archived filenames that collide get `-2`, `-3` suffixes instead of overwriting.
+
+*Rejected:* relying on "the cron runs at 3 a.m., nobody is typing". A hook reads the same files every
+turn, and a power cut on a Home Assistant box is not exotic.
+*Evidence:* `tests/test_hardening.py::LockAndCaptureTest`, `ArchiveCollisionTest`.
+
+## D14 — Retrieval gate: one rare term beats two common ones
+
+The original gate (≥2 matched terms) rejected short CJK queries and exact product names. Now: an exact
+normalized title match returns immediately, and a document qualifies on one term if that term is present
+in ≤5% of documents.
+
+*Measured:* exact-title queries 40/40 top-1 in 0.45 ms; prefix queries 40/40 land in the right family
+(the 11 "misses" are dated siblings sharing the prefix, e.g. `… 2026-07-08` vs `… 2026-07-01`).
+*Rejected:* lowering the global 2-term gate. That pulled unrelated notes in on every vague message, which
+is the failure the digest budget cannot afford.

@@ -5,3 +5,7 @@ build/
 dist/
 .venv/
 .DS_Store
+
+# a vault created inside the clone must never be published
+brain/
+*/brain/

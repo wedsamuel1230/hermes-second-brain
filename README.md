@@ -10,8 +10,8 @@ database, no embeddings, and no model inside the consolidation loop.
 ./bin/hsb context "help me plan tomorrow"        # what a hook would inject into the turn
 ```
 
-28 unit tests. Search over this machine's 162 real notes: 0.37 s to build, 2.5 ms median per query.
-Digest: 700–1200 characters, rebuilt from files every turn.
+47 unit tests. Search over this machine's 162 real notes: 0.43 s to build, 2.4 ms median per query,
+40/40 correct on exact titles. Digest: 700–1200 characters, rebuilt from files every turn.
 
 ## The problem it solves
 
@@ -99,16 +99,17 @@ understand. The Hermes part is the hook, the skill and the cron job.
 
 | Measurement | Value | Environment |
 |---|---|---|
-| Unit tests | 28 passed | Python 3.14, stdlib only |
-| Index build, 162 real notes | 0.37 s | `/config/wiki`, mixed Chinese/English |
-| Search median / p95 | 2.5 ms / 4.0 ms | same corpus, 40 queries |
-| Top-1 when querying a note's own title | 29/40 | same corpus |
-| Index size, 162 notes | 773 KB | body term counts included |
+| Unit tests | 47 passed | Python 3.14, stdlib only |
+| Index build, 162 real notes | 0.43 s | `/config/wiki`, mixed Chinese/English |
+| Search median / p95, prefix query | 2.4 ms / 9.3 ms | same corpus, 40 queries |
+| Exact-title query | 40/40 top-1, 0.45 ms | same corpus |
+| Prefix query, same note family | 40/40 top-1 in the family, 29/40 exact identity | the 11 others are dated siblings (`… 2026-07-08` vs `… 2026-07-01`) |
+| Index size, 162 notes | 780 KB | body term counts included |
 | Index build, 1003 synthetic notes | 0.64 s | uniform random text |
 | Digest length | 700–1200 chars | `hook_budget` / `digest_budget` |
 
-Uniform random corpora score worse on top-1 (13/50 at 1000 notes) because every document shares the
-same two words; real notes are sparse. Treat the synthetic row as a latency test, not an accuracy one.
+Uniform random corpora score worse (13/50 at 1000 notes) because every document shares the same two
+words; real notes are sparse. Treat the synthetic row as a latency test, not an accuracy one.
 
 ## Installation into Hermes
 

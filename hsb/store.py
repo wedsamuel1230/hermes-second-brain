@@ -23,10 +23,13 @@ Layout created by ``Vault.ensure``::
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -277,18 +280,61 @@ class Vault:
             return ""
 
     def write(self, rel: str, text: str) -> str:
+        """Atomic write: same-directory temp file, fsync, then os.replace.
+
+        A reader — the per-turn hook, or `git diff` — sees either the old file or
+        the new one, never a half-written one.
+        """
         path = self.p(rel)
         os.makedirs(os.path.dirname(path) or self.root, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or self.root, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(text if text.endswith("\n") else text + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, path)
         except BaseException:
             if os.path.exists(tmp):
                 os.unlink(tmp)
             raise
         return path
+
+    @contextlib.contextmanager
+    def locked(self, timeout: float = 15.0):
+        """Exclusive vault lock, so `capture` and `dream` cannot interleave.
+
+        flock on a file in `_meta/`; released when the process dies, so a crash
+        cannot leave a stuck lock.
+        """
+        os.makedirs(self.p("_meta"), exist_ok=True)
+        handle = open(self.p("_meta/.lock"), "a+")
+        deadline = time.time() + timeout
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() > deadline:
+                    handle.close()
+                    raise TimeoutError(f"vault busy: another writer holds {self.p('_meta/.lock')}")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+    def unique_rel(self, rel: str) -> str:
+        """``rel`` if free, else the first ``-2``, ``-3`` … variant. Never overwrite."""
+        if not os.path.exists(self.p(rel)):
+            return rel
+        base, ext = os.path.splitext(rel)
+        n = 2
+        while os.path.exists(self.p(f"{base}-{n}{ext}")):
+            n += 1
+        return f"{base}-{n}{ext}"
 
     def append(self, rel: str, text: str) -> None:
         current = self.read(rel)

@@ -15,6 +15,7 @@ from datetime import datetime
 
 from . import digest, dream, index, lint
 from .store import DEFAULT_CONFIG, Vault, parse_frontmatter, slugify, today
+from .text import terms as tokenize
 
 DEFAULT_VAULT = "~/brain"
 
@@ -64,6 +65,11 @@ def cmd_capture(args) -> int:
     if not text:
         _out("nothing to capture")
         return 2
+    if not tokenize(text):
+        # A string with no CJK bigram and no ASCII word cannot ever match another
+        # signal, so promoting it would only create noise in the digest.
+        _out("ignored: no searchable terms (punctuation or a single symbol)")
+        return 2
     stamp = datetime.now().astimezone()
     name = f"inbox/{stamp.strftime('%Y%m%d-%H%M%S')}-{slugify(text, 32)}.md"
     suffix = 1
@@ -83,8 +89,9 @@ def cmd_capture(args) -> int:
         meta["key"] = args.key
     if args.note_id:
         meta["note_id"] = args.note_id
-    vault.save_card(name, meta, f"# {text[:80]}\n\n{args.detail or ''}".strip())
-    vault.log("capture", f"{args.kind}: {text[:60]}")
+    with vault.locked():
+        vault.save_card(name, meta, f"# {text[:80]}\n\n{args.detail or ''}".strip())
+        vault.log("capture", f"{args.kind}: {text[:60]}")
     _out(f"captured → {name}")
     return 0
 
@@ -134,7 +141,8 @@ def cmd_dream(args) -> int:
 def cmd_evidence(args) -> int:
     vault = _vault(args)
     try:
-        result = dream.mark_evidence(vault, args.rule, args.outcome)
+        with vault.locked():
+            result = dream.mark_evidence(vault, args.rule, args.outcome)
     except KeyError as exc:
         _out(str(exc))
         return 1
@@ -210,14 +218,15 @@ def cmd_stats(args) -> int:
     cfg = vault.config()
     idx = index.load(vault)
     rules = [c for c in vault.cards("preferences") if str(c.meta.get("status") or "active") == "active"]
-    confs = sorted(float(c.meta.get("confidence") or 0) for c in rules)
+    conss = sorted(float(c.meta.get("confidence") or 0) for c in rules)
     data = {
         "vault": vault.root,
         "indexed": len(idx.docs),
         "notes": len(vault.md_files("notes")),
         "signals_waiting": len(vault.md_files("inbox")),
         "rules": len(rules),
-        "rules_median_confidence": confs[len(confs) // 2] if confs else None,
+        "rules_median_confidence": conss[len(conss) // 2] if conss else None,
+        "rules_never_confirmed": sum(1 for c in rules if not (c.meta.get("applied") or c.meta.get("violated"))),
         "sources": len(vault.md_files("sources")),
         "extra_dirs": cfg.get("extra_dirs") or [],
         "digest_chars": len(digest.render(vault)),

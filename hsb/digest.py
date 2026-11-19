@@ -8,7 +8,9 @@ always the same size.
 
 from __future__ import annotations
 
+import os
 import re
+import time
 from dataclasses import dataclass
 
 from .index import Hit, search
@@ -106,7 +108,11 @@ def render(vault: Vault, message: str = "", budget: int | None = None) -> str:
     cfg = vault.config()
     budget = int(budget or cfg.get("digest_budget") or 1200)
     capsule = str(cfg.get("name") or "Second Brain")
-    blocks: list[list[str]] = [[f"[{capsule}] 開工前先讀；答完要寫返。 ({vault.root})"]]
+    header = f"[{capsule}] 開工前先讀；答完要寫返。 ({vault.root})"
+    stale = _stale_dream_days(vault)
+    if stale:
+        header += f" ⚠ dream 已 {stale} 日未跑"
+    blocks: list[list[str]] = [[header]]
 
     identity = vault.card("identity.md")
     who = _bullets(identity.body, 3)
@@ -135,6 +141,19 @@ def render(vault: Vault, message: str = "", budget: int | None = None) -> str:
 
 def _clamp(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _stale_dream_days(vault: Vault, warn_after: int = 2) -> int | None:
+    """Days since the last dream, when that is old enough to warn about.
+
+    The hook fails open, so a broken nightly job would otherwise degrade silently;
+    this puts the failure in the one place the agent always reads.
+    """
+    try:
+        age = int((time.time() - os.path.getmtime(vault.active)) // 86400)
+    except OSError:
+        return None
+    return age if age >= warn_after else None
 
 
 def _load_index(vault: Vault):

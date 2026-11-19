@@ -43,7 +43,7 @@ class DreamTest(unittest.TestCase):
 
     def test_promoted_signals_are_archived_not_deleted(self):
         signal(self.vault, "s1", "唔好加 emoji")
-        signal(self.vault, "s2", "唔好加 emoji")
+        signal(self.vault, "s2", "回覆唔好加 emoji")
         report = dream.run(self.vault)
         self.assertEqual(report.archived_signals, 2)
         self.assertEqual(self.vault.md_files("inbox"), [])
@@ -66,7 +66,7 @@ class DreamTest(unittest.TestCase):
 
     def test_evidence_moves_confidence_both_ways(self):
         signal(self.vault, "s1", "唔好加 emoji")
-        signal(self.vault, "s2", "唔好加 emoji")
+        signal(self.vault, "s2", "回覆唔好加 emoji")
         report = dream.run(self.vault)
         rid = self.vault.cards("preferences")[0].meta["id"]
 
@@ -83,7 +83,7 @@ class DreamTest(unittest.TestCase):
 
     def test_dry_run_writes_nothing(self):
         signal(self.vault, "s1", "唔好加 emoji")
-        signal(self.vault, "s2", "唔好加 emoji")
+        signal(self.vault, "s2", "回覆唔好加 emoji")
         before = sorted(os.listdir(self.vault.p("inbox")))
         report = dream.run(self.vault, dry_run=True)
         self.assertEqual(len(report.promoted), 1)

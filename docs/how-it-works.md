@@ -53,22 +53,29 @@ poisoned entry traceable.
 Deterministic. Same vault plus same clock gives the same result, which is what makes the report
 reviewable.
 
-1. **Read** every card in `inbox/`, sorted by creation date.
+1. **Read** every card in `inbox/`, sorted by `(created, path)`, under an exclusive vault lock.
 2. **Cluster.** A signal with `key` joins the cluster or rule with the same key. Otherwise it joins the
    cluster with the highest `similarity()`, if that reaches `dream.similarity` (default 0.62). Otherwise
    it starts a new cluster.
-3. **Promote.** A cluster with `support >= dream.min_support` (default 2) and no existing rule becomes a
-   rule. `support = max(distinct dates, number of signals)`. The rule text is the shortest signal in the
+3. **Refuse contradictions.** If two candidates for one cluster carry opposite polarity — `加 emoji` vs
+   `唔好加 emoji`, `I like X` vs `I don't like X` — the cluster is marked `conflicted`, nothing is
+   promoted, and the pair is printed in the report for a human decision. Signals stay in `inbox/`.
+4. **Promote.** A cluster with `support >= dream.min_support` (default 2) and no existing rule becomes a
+   rule. `support` counts *independent occurrences*: an identical signal captured twice on the same day
+   is one occurrence, two different phrasings are two. The rule text is the shortest signal in the
    cluster; every member signal is listed in the body.
-4. **Reinforce.** New dates on an existing rule raise `support`, and confidence is recomputed.
-5. **Retire.** A rule with confidence below `dream.retire_below` (0.45) moves to `_archive/preferences/`
-   with `status: retired` and a reason.
-6. **Decay.** A rule untouched for `dream.stale_days` (120) loses 15% confidence.
-7. **Archive signals.** Consumed signals move to `_archive/signals/` with `status: promoted`; unmatched
-   signals older than 30 days move with `status: expired`.
-8. **Rebuild** the index, rewrite `active.md`, write `_meta/dream-YYYY-MM-DD.md`, append to `log.md`.
+5. **Reinforce.** New dates on an existing rule raise `support` and confidence, and the newest phrasing
+   becomes the displayed `rule:` while the replaced one moves to `superseded:` and stays in the body.
+6. **Retire.** A rule whose *effective* confidence falls below `dream.retire_below` (0.45) moves to
+   `_archive/preferences/` with `status: retired` and a reason.
+7. **Decay.** Effective confidence is recomputed, never compounded: see the formula below.
+8. **Archive signals.** Consumed signals move to `_archive/signals/` with `status: promoted`; unmatched
+   signals older than 30 days move with `status: expired`. Colliding filenames get `-2`, `-3` suffixes.
+9. **Rebuild** the index, rewrite `active.md`, write `_meta/dream-YYYY-MM-DD.md`, append to `log.md`.
 
-`--dry-run` performs steps 1–3 and 4's arithmetic without writing, and reports the same numbers.
+`--dry-run` performs steps 1–4's arithmetic without writing, and reports the same numbers. Running the
+pass twice on the same day writes the same content: the second run reports `decayed: 0` and changes no
+file except `log.md` and the rebuilt cache.
 
 ### Similarity
 
@@ -81,18 +88,24 @@ Containment is there because a repeat usually restates the first signal with ext
 capped at 0.85 so it cannot beat a true match, and it needs three terms so a two-character string cannot
 swallow a paragraph.
 
-### Confidence
+### Confidence and decay
 
 ```
-confidence = (1 + support + applied) / (2 + support + applied + violated)
+base        = (1 + support + applied) / (2 + support + applied + violated)
+steps       = unused_days // stale_days          # integer division, 0 while fresh
+confidence  = base × max(0, 1 − 0.15 × steps)    # recomputed every pass
 ```
 
-| support | applied | violated | confidence |
-|---|---|---|---|
-| 2 | 0 | 0 | 0.75 |
-| 2 | 1 | 0 | 0.80 |
-| 2 | 1 | 4 | 0.44 → retired |
-| 4 | 0 | 0 | 0.83 |
+| support | applied | violated | age | confidence |
+|---|---|---|---|---|
+| 2 | 0 | 0 | 0 d | 0.75 |
+| 2 | 1 | 0 | 0 d | 0.80 |
+| 2 | 1 | 4 | 0 d | 0.44 → retired |
+| 4 | 0 | 0 | 130 d | 0.83 × 0.85 = 0.71 |
+| 1 | 0 | 0 | 400 d | 0.50 × 0.55 = 0.28 → retired |
+
+Because the number is recomputed from `last_used` rather than mutated, the pass is idempotent and a rule
+decays one step per 120 unused days, not one step per night.
 
 ## 4. Retrieval
 
@@ -103,11 +116,14 @@ sha256 over `(path, mtime_ns, size)`.
 Query:
 
 1. Tokenise: CJK bigrams (single characters for one-character runs) plus ASCII words.
-2. Drop terms present in more than 60% of documents — unless that would drop everything.
-3. A document must match at least two query terms (one if the query is a single usable term).
-4. Score: `idf(t) × 3` in the title, `idf(t) × (1 + ln(tf))` in the body.
-5. Multiply 1.15 when the document is a wikilink target of another matched document.
-6. Keep hits at ≥55% of the top score, then cut to `-k`.
+2. If the normalized query equals a note title exactly, return that note alone (score 999). Titles are how
+   a human names a thing, so equality beats any weighting.
+3. Drop terms present in more than 60% of documents — unless that would drop everything.
+4. A document qualifies when it matches two query terms, **or** one term that is rare (present in ≤5% of
+   documents). A single specific word is evidence; two common words are not.
+5. Score: `idf(t) × 3` in the title, `idf(t) × (1 + ln(tf))` in the body.
+6. Multiply 1.15 when the document is a wikilink target of another matched document.
+7. Keep hits at ≥55% of the top score, then cut to `-k`.
 
 `idf(t) = ln(1 + N / (1 + df(t)))`.
 

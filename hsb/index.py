@@ -17,7 +17,7 @@ import time
 from dataclasses import asdict, dataclass, field
 
 from .store import Vault, parse_frontmatter
-from .text import excerpt, term_set, terms, wikilinks
+from .text import excerpt, normalize, term_set, terms, wikilinks
 
 HEAD_BYTES = 3000
 TITLE_WEIGHT = 3.0
@@ -123,6 +123,7 @@ def build(vault: Vault) -> Index:
         idx.docs.append({
             "p": path,
             "t": title,
+            "tn": normalize(title),
             "gt": sorted(gt),
             "tf": counts,
             "links": wikilinks(body),
@@ -164,6 +165,17 @@ def search(idx: Index, query: str, limit: int = 5, min_terms: int = MIN_QUERY_TE
         q = filtered
     need = 1 if len(q) <= 1 else min_terms
 
+    # An exact title hit is never ambiguous. Note titles are how a human names a
+    # thing ("BottleSumo 比賽規則"), so equality beats any weighting.
+    asked = normalize(query)
+    for doc in idx.docs:
+        if (doc.get("tn") or normalize(doc["t"])) == asked:
+            return [Hit(path=doc["p"], title=doc["t"], score=999.0,
+                        snippet=_snippet(doc["p"], q))]
+
+    # A single rare term is specific enough on its own; two common ones are not.
+    rare = max(1, int(total * 0.05))
+
     def idf(term: str) -> float:
         return math.log(1.0 + total / (1.0 + idx.df.get(term, 0)))
 
@@ -184,13 +196,16 @@ def search(idx: Index, query: str, limit: int = 5, min_terms: int = MIN_QUERY_TE
         gt = set(doc["gt"])
         tf = doc["tf"]
         s = 0.0
+        rare_hit = False
         for term in q:
             w = idf(term)
             if term in gt:
                 s += TITLE_WEIGHT * w
+                rare_hit = rare_hit or idx.df.get(term, 0) <= rare
             elif term in tf:
                 s += w * (1.0 + math.log(tf[term]))
-        if n < need or s <= 0:
+                rare_hit = rare_hit or idx.df.get(term, 0) <= rare
+        if (n < need and not rare_hit) or s <= 0:
             continue
         stem = doc["p"].rsplit("/", 1)[-1].lower()
         slug = stem.rsplit(".", 1)[0]

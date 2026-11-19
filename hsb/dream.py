@@ -23,15 +23,52 @@ Rules of this pass:
 from __future__ import annotations
 
 import os
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from . import digest
 from .store import Card, Vault, slugify, today, now_iso
-from .text import similarity, slugify_key
+from .text import normalize, similarity, slugify_key
 
 KINDS = ("correction", "preference", "decision", "fact")
 SIGNAL_TTL_DAYS = 30
+
+# "唔該" is politeness, not negation — strip those before looking for a negator.
+NEGATION_PHRASES = ("唔該", "唔好意思", "唔緊要")
+NEGATION = ("唔", "不", "冇", "勿", "別", "别", "無", "无", "don't", "dont", "do not", "not", "never", "without")
+
+
+def has_negation(text: str) -> bool:
+    flat = normalize(text)
+    for phrase in NEGATION_PHRASES:
+        flat = flat.replace(phrase, "")
+    return any(token in flat for token in NEGATION)
+
+
+def strip_negation(text: str) -> str:
+    flat = normalize(text)
+    for phrase in NEGATION_PHRASES:
+        flat = flat.replace(phrase, "")
+    for token in NEGATION:
+        flat = flat.replace(token, "")
+    return flat
+
+
+def _dice(a: str, b: str) -> float:
+    """Character-bigram-free overlap. Chinese inserts a negator mid-word, so the
+    term tokeniser is too coarse to compare '回覆加emoji' with '回覆唔好加emoji'."""
+    if not a or not b:
+        return 0.0
+    common = sum((Counter(a) & Counter(b)).values())
+    return 2 * common / (len(a) + len(b))
+
+
+def polarity_conflict(a: str, b: str) -> bool:
+    """Same statement, opposite polarity: a contradiction, never a repeat."""
+    if has_negation(a) == has_negation(b):
+        return False
+    return _dice(strip_negation(a), strip_negation(b)) >= 0.6
 
 
 @dataclass
@@ -51,10 +88,12 @@ class Cluster:
     key: str
     members: list[Signal] = field(default_factory=list)
     rule_path: str = ""
+    conflicted: bool = False
 
     @property
     def support(self) -> int:
-        return len({m.created[:10] for m in self.members}) or len(self.members)
+        """Independent occurrences: an identical signal on the same day counts once."""
+        return len({(m.created[:10] or "", normalize(m.text)) for m in self.members})
 
 
 @dataclass
@@ -67,6 +106,7 @@ class Report:
     reinforced: list[dict] = field(default_factory=list)
     retired: list[str] = field(default_factory=list)
     decayed: list[str] = field(default_factory=list)
+    conflicts: list[dict] = field(default_factory=list)
     archived_signals: int = 0
     expired_signals: int = 0
     docs: int = 0
@@ -82,6 +122,7 @@ class Report:
             "reinforced": self.reinforced,
             "retired": self.retired,
             "decayed": self.decayed,
+            "conflicts": self.conflicts,
             "archived_signals": self.archived_signals,
             "expired_signals": self.expired_signals,
             "docs": self.docs,
@@ -96,6 +137,7 @@ class Report:
             f"| 加固 | {len(self.reinforced)} |",
             f"| 退役 | {len(self.retired)} |",
             f"| 衰減 | {len(self.decayed)} |",
+            f"| 矛盾（未自動升做規則） | {len(self.conflicts)} |",
             f"| 封存訊號 | {self.archived_signals} |",
             f"| 過期訊號 | {self.expired_signals} |",
             f"| 索引文件 | {self.docs} |",
@@ -110,6 +152,9 @@ class Report:
             detail.append(f"- 退役 `{r}`（信心低於門檻，已移入 `_archive/`）")
         for d in self.decayed:
             detail.append(f"- 衰減 `{d}`（長期未被引用）")
+        for c in self.conflicts:
+            texts = " / ".join(c.get("texts") or [])
+            detail.append(f"- 矛盾 `{c.get('key')}`：{texts} —— 需要人決定，已留在 inbox")
         return "# Dream report — {d}\n\n| 項目 | 數值 |\n|---|---|\n{b}\n".format(
             d=self.date, b=body) + ("\n" + "\n".join(detail) + "\n" if detail else "")
 
@@ -153,14 +198,26 @@ def _cluster(signals: list[Signal], rules: list[Card], threshold: float) -> list
         by_key[key] = cluster
     for sig in signals:
         if sig.key and sig.key in by_key:
-            by_key[sig.key].members.append(sig)
+            cluster = by_key[sig.key]
+            if polarity_conflict(sig.text, cluster.rep) or (
+                    has_negation(sig.text) != has_negation(cluster.rep) and similarity(sig.text, cluster.rep) >= 0.5):
+                cluster.conflicted = True
+            cluster.members.append(sig)
             continue
         best, best_score = None, 0.0
         for cluster in clusters:
+            if polarity_conflict(sig.text, cluster.rep):
+                cluster.conflicted = True
+                best, best_score = cluster, threshold
+                break
             score = similarity(sig.text, cluster.rep)
             if score > best_score:
                 best, best_score = cluster, score
         if best is not None and best_score >= threshold:
+            # Same words with the opposite polarity ("加 emoji" / "唔好加 emoji")
+            # is a contradiction, not a repeat: it must never be averaged into a rule.
+            if has_negation(sig.text) != has_negation(best.rep):
+                best.conflicted = True
             best.members.append(sig)
             if sig.key and sig.key not in by_key:
                 by_key[sig.key] = best
@@ -192,11 +249,17 @@ def _rule_body(rule: str, members: list[Signal]) -> str:
 
 
 def run(vault: Vault, dry_run: bool = False) -> Report:
+    """One consolidation pass. Serialised against `capture` by the vault lock."""
+    with vault.locked():
+        return _run(vault, dry_run)
+
+
+def _run(vault: Vault, dry_run: bool = False) -> Report:
     cfg = vault.config().get("dream", {})
     min_support = int(cfg.get("min_support", 2))
     threshold = float(cfg.get("similarity", 0.62))
     retire_below = float(cfg.get("retire_below", 0.45))
-    stale_days = int(cfg.get("stale_days", 120))
+    stale_days = max(1, int(cfg.get("stale_days", 120)))
     stamp = today()
     report = Report(date=stamp, dry_run=dry_run)
 
@@ -207,10 +270,16 @@ def run(vault: Vault, dry_run: bool = False) -> Report:
     clusters = _cluster(signals, rules, threshold)
 
     used_paths: set[str] = set()
-    touched_rules: set[str] = set()
     for cluster in clusters:
         distinct_days = {s.created[:10] for s in cluster.members if s.created}
-        support = max(len(distinct_days), len(cluster.members))
+
+        if cluster.conflicted:
+            report.conflicts.append({
+                "key": cluster.key,
+                "texts": [s.text for s in cluster.members][:4],
+                "path": cluster.rule_path,
+            })
+            continue
 
         if cluster.rule_path:
             card = vault.card(cluster.rule_path)
@@ -218,8 +287,8 @@ def run(vault: Vault, dry_run: bool = False) -> Report:
             added = sorted(d for d in distinct_days if d not in dates)
             if not added:
                 continue
-            dates = sorted(set(dates) | added)
-            prior = int(card.meta.get("support") or len(dates) or 1)
+            dates = sorted(set(dates) | set(added))
+            prior = int(card.meta.get("support") or 1)
             new_support = prior + len(added)
             applied = int(card.meta.get("applied") or 0)
             violated = int(card.meta.get("violated") or 0)
@@ -230,17 +299,27 @@ def run(vault: Vault, dry_run: bool = False) -> Report:
                 report.reinforced.append({"id": str(card.meta.get("id") or cluster.rule_path),
                                           "confidence": conf, "evidence": len(dates)})
                 continue
+            newest = max(cluster.members, key=lambda s: (s.created, s.path))
+            old_rule = str(card.meta.get("rule") or "")
+            if normalize(newest.text) != normalize(old_rule):
+                # The newest phrasing wins the displayed rule; the old one stays
+                # in the body and in `superseded`, so the change is auditable.
+                card.meta["rule"] = newest.text.strip()
+                card.meta["title"] = newest.text.strip()[:80]
+                if old_rule:
+                    card.meta["superseded"] = list(card.meta.get("superseded") or []) + [old_rule]
             card.meta["evidence"] = dates
             card.meta["support"] = new_support
             card.meta["confidence"] = conf
             card.meta["updated"] = stamp
             card.meta["last_used"] = stamp
-            vault.save_card(card.path, card.meta, card.body)
-            touched_rules.add(card.path)
+            vault.save_card(card.path, card.meta, _merge_body(card, cluster.members))
             report.reinforced.append({"id": str(card.meta.get("id") or card.path),
-                                      "confidence": conf, "evidence": len(dates)})
+                                      "confidence": conf, "evidence": len(dates),
+                                      "superseded": normalize(newest.text) != normalize(old_rule)})
             continue
 
+        support = cluster.support
         if support < min_support:
             continue
 
@@ -254,29 +333,38 @@ def run(vault: Vault, dry_run: bool = False) -> Report:
             continue
         path, rid = _write_rule(vault, rule_text, term_key, cluster, support, stamp)
         cluster.rule_path = path
-        touched_rules.add(path)
         report.promoted.append({"id": rid, "rule": rule_text, "support": support,
                                 "confidence": _confidence(support, 0, 0), "path": path})
 
     # -- retire and decay ---------------------------------------------------
+    # Confidence is a pure function of (support, applied, violated, age). Decay is
+    # therefore recomputed, never compounded: running the pass twice on the same
+    # day produces the same number, and a 120-day-old rule loses one step per
+    # 120 days rather than one step per night.
     for card in _rules(vault):
-        if card.path in touched_rules:
-            continue
         rid = str(card.meta.get("id") or os.path.basename(card.path))
-        conf = float(card.meta.get("confidence") or 0.5)
+        support = int(card.meta.get("support") or 1)
+        applied = int(card.meta.get("applied") or 0)
+        violated = int(card.meta.get("violated") or 0)
         last = str(card.meta.get("last_used") or card.meta.get("updated") or card.meta.get("created") or "")
-        if conf < retire_below:
+        unused = _age_days(last) if last else 0
+        base = _confidence(support, applied, violated)
+        steps = unused // stale_days
+        eff = round(base * max(0.0, 1 - 0.15 * steps), 3)
+        prev = float(card.meta.get("confidence") or base)
+        if eff < retire_below:
             report.retired.append(rid)
             if not dry_run:
                 _archive(vault, card.path, {"status": "retired", "retired": stamp,
-                                            "retire_reason": f"confidence {conf:.2f} < {retire_below}"})
+                                            "retire_reason": f"effective confidence {eff:.2f} < {retire_below}"})
             continue
-        if last and _age_days(last) > stale_days:
+        if round(eff - prev, 3) != 0:
             report.decayed.append(rid)
             if not dry_run:
-                card.meta["confidence"] = round(conf * 0.85, 3)
+                card.meta["confidence"] = eff
+                card.meta["base_confidence"] = base
+                card.meta["unused_days"] = unused
                 card.meta["updated"] = stamp
-                card.meta["decay_note"] = f"no use for >{stale_days}d, confidence -15%"
                 vault.save_card(card.path, card.meta, card.body)
 
     # -- signals: consumed, or expired -------------------------------------
@@ -305,8 +393,28 @@ def run(vault: Vault, dry_run: bool = False) -> Report:
         digest.write_active(vault)
         vault.write(f"_meta/dream-{stamp}.md", report.render())
         vault.log("dream", f"signals={report.signals} promoted={len(report.promoted)} "
-                           f"retired={len(report.retired)}")
+                           f"retired={len(report.retired)} conflicts={len(report.conflicts)}")
     return report
+
+
+def _merge_body(card: Card, members: list[Signal]) -> str:
+    """Append source lines for new members, skipping any already recorded."""
+    body = card.body
+    new_lines = []
+    for sig in sorted(members, key=lambda s: (s.created, s.path)):
+        when = sig.created[:10] or "未註明日期"
+        src = f" · {sig.source}" if sig.source else ""
+        line = f"- {when}{src} · {sig.text}"
+        if sig.text in body:
+            continue
+        new_lines.append(line)
+    if not new_lines:
+        return body
+    marker = "## 應驗紀錄"
+    if marker in body:
+        head, _, tail = body.partition(marker)
+        return head.rstrip() + "\n" + "\n".join(new_lines) + "\n\n" + marker + tail
+    return body.rstrip() + "\n\n" + "\n".join(new_lines) + "\n"
 
 
 def _rule_text(cluster: Cluster) -> str:
@@ -365,7 +473,7 @@ def mark_evidence(vault: Vault, rule_id: str, outcome: str) -> dict:
 def _archive(vault: Vault, rel: str, meta: dict, keep_body: str = "") -> str:
     name = os.path.basename(rel)
     bucket = "signals" if rel.startswith("inbox/") else "preferences"
-    target = f"_archive/{bucket}/{name}"
+    target = vault.unique_rel(f"_archive/{bucket}/{name}")
     body = keep_body if keep_body else vault.card(rel).body
     meta = dict(meta)
     meta["archived"] = now_iso()
