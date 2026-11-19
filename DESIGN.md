@@ -137,9 +137,11 @@ deterministic and all applied both when signals cluster and again before a rule 
    CJK members must leave near-identical remainders after removal, so `開會` does not collide with `關門`.
 
 A conflicted cluster is never promoted or reinforced; it is printed in the report with both texts and its
-signals stay in `inbox/`. `_clash_with()` repeats the check against every live rule before writing, so
-opposite preferences cannot each get their own file. As a last line of defence the digest itself drops a
-rule that contradicts a newer one.
+signals stay in `inbox/`. `_clash()` repeats the check against every live rule before writing, and if the
+new statement is strictly newer than the live rule it replaces it: the new rule is written first, then
+the old one is archived with `status: superseded` / `superseded_by` / `supersede_reason`. Same-day
+opposites are left to a human, because the order is not knowable. As a last line of defence the digest
+itself drops a rule that contradicts a newer one.
 
 The antonym table is closed on purpose: an unlisted opposite (`prefer tea` / `prefer coffee`) is a
 documented gap, and it fails safe — two separate rules, visible in `hsb stats`, rather than a silent

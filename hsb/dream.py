@@ -57,6 +57,7 @@ class Cluster:
     members: list[Signal] = field(default_factory=list)
     rule_path: str = ""
     conflicted: bool = False
+    from_rule: bool = False
 
     @property
     def support(self) -> int:
@@ -75,6 +76,7 @@ class Report:
     retired: list[str] = field(default_factory=list)
     decayed: list[str] = field(default_factory=list)
     conflicts: list[dict] = field(default_factory=list)
+    superseded: list[dict] = field(default_factory=list)
     archived_signals: int = 0
     expired_signals: int = 0
     docs: int = 0
@@ -91,6 +93,7 @@ class Report:
             "retired": self.retired,
             "decayed": self.decayed,
             "conflicts": self.conflicts,
+            "superseded": self.superseded,
             "archived_signals": self.archived_signals,
             "expired_signals": self.expired_signals,
             "docs": self.docs,
@@ -106,6 +109,7 @@ class Report:
             f"| 退役 | {len(self.retired)} |",
             f"| 衰減 | {len(self.decayed)} |",
             f"| 矛盾（未自動升做規則） | {len(self.conflicts)} |",
+            f"| 取代（新講法蓋舊規則） | {len(self.superseded)} |",
             f"| 封存訊號 | {self.archived_signals} |",
             f"| 過期訊號 | {self.expired_signals} |",
             f"| 索引文件 | {self.docs} |",
@@ -123,6 +127,8 @@ class Report:
         for c in self.conflicts:
             texts = " / ".join(c.get("texts") or [])
             detail.append(f"- 矛盾 `{c.get('key')}`：{texts} —— 需要人決定，已留在 inbox")
+        for s in self.superseded:
+            detail.append(f"- 取代 `{s.get('old')}` → `{s.get('new')}`（舊規則已移入 _archive）")
         return "# Dream report — {d}\n\n| 項目 | 數值 |\n|---|---|\n{b}\n".format(
             d=self.date, b=body) + ("\n" + "\n".join(detail) + "\n" if detail else "")
 
@@ -161,19 +167,24 @@ def _cluster(signals: list[Signal], rules: list[Card], threshold: float) -> list
     clusters: list[Cluster] = []
     for rule in rules:
         key = str(rule.meta.get("key") or rule.meta.get("id") or rule.path)
-        cluster = Cluster(rep=str(rule.meta.get("rule") or rule.title), key=key, rule_path=rule.path)
+        cluster = Cluster(rep=str(rule.meta.get("rule") or rule.title), key=key,
+                          rule_path=rule.path, from_rule=True)
         clusters.append(cluster)
         by_key[key] = cluster
     for sig in signals:
-        if sig.key and sig.key in by_key:
-            cluster = by_key[sig.key]
-            if polarity_conflict(sig.text, cluster.rep):
-                cluster.conflicted = True
-            cluster.members.append(sig)
+        keyed = by_key.get(sig.key) if sig.key else None
+        if keyed is not None and not (keyed.from_rule and polarity_conflict(sig.text, keyed.rep)):
+            if polarity_conflict(sig.text, keyed.rep):
+                keyed.conflicted = True
+            keyed.members.append(sig)
             continue
         best, best_score = None, 0.0
         for cluster in clusters:
-            if polarity_conflict(sig.text, cluster.rep):
+            if cluster.from_rule and polarity_conflict(sig.text, cluster.rep):
+                # Leave the live rule alone: the promotion path decides whether a
+                # newer opposite replaces it or the pair goes to a human.
+                continue
+            if not cluster.from_rule and polarity_conflict(sig.text, cluster.rep):
                 cluster.conflicted = True
                 best, best_score = cluster, threshold
                 break
@@ -292,10 +303,20 @@ def _run(vault: Vault, dry_run: bool = False) -> Report:
             continue
 
         rule_text = _rule_text(cluster)
-        clash = _clash_with(rule_text, rules, promoted_texts)
-        if clash:
-            report.conflicts.append({"key": cluster.key, "texts": [rule_text, clash]})
-            continue
+        clash_card, clash_text = _clash(rule_text, rules, promoted_texts)
+        supersede = False
+        if clash_text:
+            newest = max((s.created[:10] for s in cluster.members if s.created), default="")
+            live = ""
+            if clash_card is not None:
+                live = str(clash_card.meta.get("last_used") or clash_card.meta.get("created") or "")[:10]
+            # A later statement replaces an older opposite one; the same-day or
+            # older case is left for a human, because the order is not knowable.
+            if clash_card is not None and newest and live and newest > live:
+                supersede = True
+            else:
+                report.conflicts.append({"key": cluster.key, "texts": [rule_text, clash_text]})
+                continue
 
         for member in cluster.members:
             used_paths.add(member.path)
@@ -307,6 +328,13 @@ def _run(vault: Vault, dry_run: bool = False) -> Report:
             continue
         path, rid = _write_rule(vault, rule_text, term_key, cluster, support, stamp)
         cluster.rule_path = path
+        if supersede and clash_card is not None:
+            old_id = str(clash_card.meta.get("id") or clash_card.path)
+            _archive(vault, clash_card.path, {
+                "status": "superseded", "superseded_by": rid, "superseded_on": stamp,
+                "supersede_reason": f"{newest} statement replaces {live} rule",
+            })
+            report.superseded.append({"old": old_id, "new": rid})
         promoted_texts.append(rule_text)
         report.promoted.append({"id": rid, "rule": rule_text, "support": support,
                                 "confidence": _confidence(support, 0, 0), "path": path})
@@ -372,21 +400,21 @@ def _run(vault: Vault, dry_run: bool = False) -> Report:
     return report
 
 
-def _clash_with(text: str, rules: list[Card], promoted: list[str]) -> str | None:
-    """A statement that contradicts `text`, whether already live or promoted this run.
+def _clash(text: str, rules: list[Card], promoted: list[str]) -> tuple[Card | None, str | None]:
+    """A statement that contradicts `text`: a live rule (with its card) or one
+    promoted earlier in this run (text only).
 
-    This is what stops two opposite preferences from each getting their own rule:
-    overlap alone never joins them into one cluster, so the check has to happen at
-    promotion time as well.
+    Overlap alone never joins opposites into one cluster, so the check has to
+    happen at promotion time as well.
     """
     for card in rules:
         other = str(card.meta.get("rule") or "").strip()
         if other and conflicts(text, other):
-            return other
+            return card, other
     for other in promoted:
         if conflicts(text, other):
-            return other
-    return None
+            return None, other
+    return None, None
 
 
 def _merge_body(card: Card, members: list[Signal]) -> str:

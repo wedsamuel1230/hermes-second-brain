@@ -386,6 +386,45 @@ class DigestConflictFilterTest(unittest.TestCase):
             self.assertNotIn("客廳要開冷氣", text)
 
 
+class SupersedeLiveRuleTest(unittest.TestCase):
+    """B16 (grok): a later opposite must be able to replace a live rule."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = Vault(self.tmp.name).ensure()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_later_statement_replaces_live_rule(self):
+        rule(self.vault, "P-cold", "客廳要開冷氣", last_used="2026-10-01")
+        signal(self.vault, "s1", "客廳要關冷氣")
+        signal(self.vault, "s2", "客廳要關冷氣啦")
+        report = dream.run(self.vault)
+        self.assertEqual(len(report.promoted), 1)
+        self.assertEqual(len(report.superseded), 1)
+        live = [c for c in self.vault.cards("preferences")]
+        self.assertEqual(len(live), 1)
+        self.assertIn("關冷氣", live[0].meta["rule"])
+        self.assertIn("客廳要關冷氣", digest.render(self.vault))
+
+    def test_same_day_clash_waits_for_a_human(self):
+        rule(self.vault, "P-cold", "客廳要開冷氣", last_used=today())
+        signal(self.vault, "s1", "客廳要關冷氣")
+        signal(self.vault, "s2", "客廳要關冷氣啦")
+        report = dream.run(self.vault)
+        self.assertEqual(report.promoted, [])
+        self.assertEqual(report.superseded, [])
+        self.assertEqual(len(report.conflicts), 1)
+        self.assertEqual(len(self.vault.cards("preferences")), 1)
+
+    def test_ascii_unrelated_sentences_do_not_clash(self):
+        signal(self.vault, "s1", "keep the porch light on after sunset")
+        signal(self.vault, "s2", "turn off notifications at 22:00")
+        report = dream.run(self.vault)
+        self.assertEqual(report.conflicts, [])
+
+
 class DigestBudgetTest(unittest.TestCase):
     """B2 (gpt): the budget holds for CJK text, not just ASCII."""
 

@@ -64,8 +64,10 @@ reviewable.
    - antonym — each side holds one member of a closed opposite table (`dark`/`light`, `開`/`關`,
      `enable`/`disable`, …, 27 pairs).
    A contradiction never promotes, never reinforces, and is printed in the report with both texts; its
-   signals stay in `inbox/` for a human. A new rule is also checked against every live rule, so two
-   opposite preferences cannot each get their own file.
+   signals stay in `inbox/` for a human. One exception: when the new side is strictly newer than the live
+   rule, it replaces it — the new rule is written first, then the old one is archived with
+   `status: superseded`, `superseded_by` and a reason. Same-day opposites go to a human, because the
+   order is not knowable.
 4. **Promote.** A cluster with `support >= dream.min_support` (default 2) and no existing rule becomes a
    rule. `support` counts *independent occurrences*: an identical signal captured twice on the same day
    is one occurrence, two different phrasings are two. The rule text is the shortest signal in the
